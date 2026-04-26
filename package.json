@@ -1,0 +1,41 @@
+{
+  "name": "@ferrarirosso/spfx-foundry-deploy",
+  "version": "0.1.0",
+  "description": "Provision a protected, Foundry-backed Function App proxy for SPFx web parts. Idempotent CLI with a single-screen review form, region-scoped model picker, soft-delete handling, Easy Auth wiring (Entra-required, no function key in the browser), and platform hardening.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "spfx-foundry-deploy": "./bin/spfx-foundry-deploy.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ferrarirosso/spfx-foundry-deploy.git"
+  },
+  "homepage": "https://github.com/ferrarirosso/spfx-foundry-deploy#readme",
+  "bugs": {
+    "url": "https://github.com/ferrarirosso/spfx-foundry-deploy/issues"
+  },
+  "keywords": [
+    "spfx",
+    "sharepoint",
+    "azure-functions",
+    "foundry",
+    "azure-openai",
+    "easy-auth",
+    "managed-identity",
+    "deployer",
+    "cli"
+  ],
+  "author": "Nello D'Andrea",
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "deploy.config.schema.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
+}

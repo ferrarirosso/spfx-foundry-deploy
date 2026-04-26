@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Per-project deploy state — secrets-adjacent, never tracked
+.deploy-output.json
+
+# Local Functions config — secrets, never tracked
+local.settings.json
+
+# IDE / OS
+.vscode/
+.vs/
+.DS_Store
+Thumbs.db

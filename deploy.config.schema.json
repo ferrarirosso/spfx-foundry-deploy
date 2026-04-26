@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spfx-foundry-deploy config",
+  "type": "object",
+  "description": "All fields are optional. The deployer infers slug from your package.json 'name' and defaults profile to 'chat-completions'. Drop a deploy.config.json next to your webpart only if you want to commit non-default values or pre-declare serveProperties to be prompted for at deploy time.",
+  "properties": {
+    "slug": {
+      "type": "string",
+      "description": "Stable identifier — keys .deploy-output.json so multiple webparts in one repo can coexist. Defaults to your package.json 'name' field (with @scope/ stripped). Lowercase, alphanumeric + dashes."
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["chat-completions"],
+      "description": "Provisioning recipe. Currently only 'chat-completions'. Defaults to 'chat-completions'."
+    },
+    "namePrefix": {
+      "type": "string",
+      "description": "Drives Azure resource names (rg-<prefix>, <prefix>-ai, <prefix>-proxy, etc.). User can edit at deploy time. Defaults to slug if omitted."
+    },
+    "location": {
+      "type": "string",
+      "description": "Default Azure region. User can change at deploy time. Defaults to swedencentral."
+    },
+    "model": {
+      "type": "object",
+      "description": "Default model. The deploy form lets the user pick a different one from those available in the chosen region.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Model family name, e.g. 'gpt-5-mini', 'gpt-4o-mini'. Defaults to gpt-5-mini if available."
+        }
+      }
+    },
+    "requestLimits": {
+      "type": "object",
+      "description": "Per-caller request rate limits enforced by the proxy.",
+      "properties": {
+        "perMinute": { "type": "number" },
+        "perDay": { "type": "number" }
+      }
+    },
+    "serveProperties": {
+      "type": "object",
+      "description": "Extra properties to merge into the patched serve.json (e.g. 'environmentId' for MCP webparts). Empty-string values mean 'ask me at deploy time' — the deployer prompts for them and writes the answer into serve.json only, leaving the file's empty-string contract intact for next deploy.",
+      "additionalProperties": { "type": "string" }
+    },
+    "defaults": {
+      "type": "object",
+      "description": "DEPRECATED. Earlier configs used this block to override individual resource names; new configs should use namePrefix instead. Still honoured for backwards compat — explicit values here win over namePrefix-derived ones.",
+      "properties": {
+        "resourceGroup": { "type": "string" },
+        "location": { "type": "string" },
+        "aiServicesName": { "type": "string" },
+        "functionAppName": { "type": "string" },
+        "storageName": { "type": "string" },
+        "deploymentName": { "type": "string" },
+        "backendApiAppDisplayName": { "type": "string" }
+      }
+    }
+  }
+}
