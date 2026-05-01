@@ -43,7 +43,13 @@ async function main() {
     process.exit(1);
   }
 
-  const resolvedServeProperties = await resolveServeProperties(config.serveProperties);
+  // setup is a no-Azure-changes path — restore serveProperties from the cache
+  // silently. Only prompt if a key is empty in BOTH config and cache.
+  const resolvedServeProperties = await resolveServeProperties(
+    config.serveProperties,
+    slugData.serveProperties,
+    { autoUseCached: true }
+  );
   const props = {
     backendUrl: slugData.backendUrl,
     backendApiResource: slugData.backendApiResource,

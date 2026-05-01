@@ -36,7 +36,7 @@ import { pickSubscription } from "../src/prompts/pickSubscription.mjs";
 import { suggestSharePointOrigin } from "../src/prompts/pickSharePointOrigin.mjs";
 import { listModelsInRegion } from "../src/prompts/pickModel.mjs";
 import { deployChatCompletionsBackend } from "../src/profile/chat-completions.mjs";
-import { writeDeployOutput } from "../src/wiring/deployOutput.mjs";
+import { writeDeployOutput, readDeployOutput } from "../src/wiring/deployOutput.mjs";
 import { patchServeJson } from "../src/wiring/serveJson.mjs";
 import { patchPackageSolution } from "../src/wiring/packageSolution.mjs";
 import { resolveServeProperties } from "../src/wiring/serveProperties.mjs";
@@ -196,7 +196,13 @@ async function main() {
   // Prompt for any serveProperties left empty in deploy.config.json — the
   // empty-string contract means "ask me at deploy time, don't bake the value
   // into the file". Resolved values are wired into serve.json only.
-  const resolvedServeProperties = await resolveServeProperties(config.serveProperties);
+  // Cached values from a previous deploy (if any) become prompt defaults so
+  // the operator doesn't have to retype tenant GUIDs on every redeploy.
+  const cachedDeployOutput = readDeployOutput(repoRoot)[config.slug] || {};
+  const resolvedServeProperties = await resolveServeProperties(
+    config.serveProperties,
+    cachedDeployOutput.serveProperties
+  );
 
   if (isDryRun) {
     logOk("Dry-run: would now proceed with the deployment steps against the values above.");
@@ -245,6 +251,8 @@ async function main() {
   // ── Persist deploy output (always) ──────────────────────────
   // No secrets — Easy Auth handles browser auth via the SPFx-acquired bearer
   // token. Function keys are deliberately not part of this flow.
+  // serveProperties are persisted so `setup` can restore them on a fresh
+  // clone without re-prompting the operator for per-tenant GUIDs.
   const outputPath = writeDeployOutput(repoRoot, config.slug, {
     backendUrl: result.proxyUrl,
     backendApiResource: result.backendApiResource,
@@ -258,6 +266,7 @@ async function main() {
     modelName: result.modelName,
     deploymentName: result.deploymentName,
     profile: config.profile,
+    serveProperties: resolvedServeProperties,
   });
   logOk(`Saved deploy output: ${outputPath}`);
 
@@ -299,7 +308,28 @@ async function main() {
   logInfo("4. SharePoint Admin Center → API access → approve any pending requests");
   logInfo("5. Add the web part to a SharePoint page");
   log("");
-  logInfo("Property pane is auto-wired with backendUrl + backendApiResource.");
+  // Echo every property the deployer wrote into serve.json so the operator can
+  // verify their input landed and knows exactly what the property pane will
+  // read at workbench time. Includes serveProperties values typed at the
+  // serveProperties.* prompts (e.g. environmentId).
+  if (!args["no-wire"]) {
+    const wiredProps = {
+      backendUrl: result.proxyUrl,
+      backendApiResource: result.backendApiResource,
+      ...resolvedServeProperties,
+    };
+    const wiredKeys = Object.keys(wiredProps);
+    logInfo(`Property pane is auto-wired with: ${wiredKeys.join(", ")}.`);
+    const maxKeyLen = Math.max(...wiredKeys.map((k) => k.length));
+    for (const key of wiredKeys) {
+      const value = wiredProps[key];
+      const display = value === undefined || value === null || value === ""
+        ? `${colors.dim}(empty — set in property pane on the page)${colors.reset}`
+        : value;
+      log(`  ${colors.dim}  ${key.padEnd(maxKeyLen)}  =${colors.reset} ${display}`);
+    }
+    log("");
+  }
   logInfo("Easy Auth gates the proxy via the SPFx-acquired Entra token.");
   logInfo("Tear down with 'npm run teardown' when you're done.");
   if (configPath) {
