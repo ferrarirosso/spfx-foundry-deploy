@@ -275,13 +275,12 @@ async function main() {
     logInfo("--no-wire: skipping serve.json + package-solution.json patches.");
   } else {
     try {
-      const wireProps = {
-        backendUrl: result.proxyUrl,
-        backendApiResource: result.backendApiResource,
-        ...resolvedServeProperties,
-      };
-      const { servePath } = patchServeJson(webpartDir, wireProps);
-      logOk(`Wired ${servePath.replace(repoRoot + "/", "")}`);
+      // serve.json gets cleaned to its minimal schema-valid shape (port, https,
+      // initialPage). The webpart property values live in the deploy summary
+      // and in .deploy-output.json; SPFx has no source-controlled mechanism
+      // to inject them into the workbench property pane.
+      const { servePath } = patchServeJson(webpartDir, {});
+      logOk(`Cleaned ${servePath.replace(repoRoot + "/", "")}`);
     } catch (error) {
       logFail(`Could not patch serve.json: ${error.message}`);
       logInfo("Re-run any time with: npm run setup");
@@ -308,28 +307,28 @@ async function main() {
   logInfo("4. SharePoint Admin Center → API access → approve any pending requests");
   logInfo("5. Add the web part to a SharePoint page");
   log("");
-  // Echo every property the deployer wrote into serve.json so the operator can
-  // verify their input landed and knows exactly what the property pane will
-  // read at workbench time. Includes serveProperties values typed at the
-  // serveProperties.* prompts (e.g. environmentId).
-  if (!args["no-wire"]) {
-    const wiredProps = {
-      backendUrl: result.proxyUrl,
-      backendApiResource: result.backendApiResource,
-      ...resolvedServeProperties,
-    };
-    const wiredKeys = Object.keys(wiredProps);
-    logInfo(`Property pane is auto-wired with: ${wiredKeys.join(", ")}.`);
-    const maxKeyLen = Math.max(...wiredKeys.map((k) => k.length));
-    for (const key of wiredKeys) {
-      const value = wiredProps[key];
-      const display = value === undefined || value === null || value === ""
-        ? `${colors.dim}(empty — set in property pane on the page)${colors.reset}`
-        : value;
-      log(`  ${colors.dim}  ${key.padEnd(maxKeyLen)}  =${colors.reset} ${display}`);
-    }
-    log("");
+  // Echo every value the operator needs in the SPFx property pane on first
+  // workbench session. SPFx doesn't support pre-populating webpart properties
+  // via serve.json (the schema doesn't allow it) — these are paste-once on
+  // first workbench load; the workbench persists them in browser storage
+  // thereafter. On a real SharePoint page, set them once when adding the
+  // webpart; the page persists them permanently.
+  const paneProps = {
+    backendUrl: result.proxyUrl,
+    backendApiResource: result.backendApiResource,
+    ...resolvedServeProperties,
+  };
+  const paneKeys = Object.keys(paneProps);
+  log(`\n  Set these in the property pane on first use:\n`, colors.bold);
+  const maxKeyLen = Math.max(...paneKeys.map((k) => k.length));
+  for (const key of paneKeys) {
+    const value = paneProps[key];
+    const display = value === undefined || value === null || value === ""
+      ? `${colors.dim}(empty — fill in the property pane)${colors.reset}`
+      : value;
+    log(`    ${key.padEnd(maxKeyLen)}  =  ${display}`);
   }
+  log("");
   logInfo("Easy Auth gates the proxy via the SPFx-acquired Entra token.");
   logInfo("Tear down with 'npm run teardown' when you're done.");
   if (configPath) {

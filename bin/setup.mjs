@@ -50,15 +50,18 @@ async function main() {
     slugData.serveProperties,
     { autoUseCached: true }
   );
-  const props = {
+  const paneProps = {
     backendUrl: slugData.backendUrl,
     backendApiResource: slugData.backendApiResource,
     ...resolvedServeProperties,
   };
 
   try {
-    const { servePath } = patchServeJson(webpartDir, props);
-    logOk(`Patched: ${servePath}`);
+    // serve.json is kept minimal (schema doesn't allow webpart property
+    // pre-population). The values below are for the operator to paste into
+    // the property pane on first workbench session.
+    const { servePath } = patchServeJson(webpartDir, {});
+    logOk(`Cleaned: ${servePath}`);
   } catch (error) {
     logFail(`Could not patch serve.json: ${error.message}`);
     closePrompt();
@@ -77,6 +80,20 @@ async function main() {
       logFail(`Could not patch package-solution.json: ${error.message}`);
     }
   }
+
+  // Echo the property pane values the operator needs.
+  const paneKeys = Object.keys(paneProps);
+  log(`\n  Set these in the property pane on first use:\n`, colors.bold);
+  const maxKeyLen = Math.max(...paneKeys.map((k) => k.length));
+  for (const key of paneKeys) {
+    const value = paneProps[key];
+    const display =
+      value === undefined || value === null || value === ""
+        ? `${colors.dim}(empty — fill in the property pane)${colors.reset}`
+        : value;
+    log(`    ${key.padEnd(maxKeyLen)}  =  ${display}`);
+  }
+  log("");
 
   log(`  Last deployed: ${slugData.deployedAt}`, colors.dim);
   closePrompt();
