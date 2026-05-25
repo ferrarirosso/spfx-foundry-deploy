@@ -1,6 +1,6 @@
 {
   "name": "@ferrarirosso/spfx-foundry-deploy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Provision a protected, Foundry-backed Function App proxy for SPFx web parts. Idempotent CLI with a single-screen review form, region-scoped model picker, soft-delete handling, Easy Auth wiring (Entra-required, no function key in the browser), and platform hardening.",
   "type": "module",
   "engines": {

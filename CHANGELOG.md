@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — 2026-05-25
+
+### Fixed
+
+- **multi-model: grant `Cognitive Services User` in addition to
+  `Cognitive Services OpenAI User`.** The OpenAI-User role only authorizes the
+  `/openai/` inference path; image models on the MAI surface
+  (`…services.ai.azure.com/mai/v1/images/generations`) returned 401/403 under
+  managed identity. The multi-model profile now assigns both roles so image and
+  chat deployments both work out of the box. (chat-completions is unchanged.)
+
 ## 0.2.0 — 2026-05-25
 
 Adds multi-model deployments without changing the single-model path.

@@ -306,50 +306,58 @@ export async function deployMultiModelBackend({
     bail(steps, 6, e);
   }
 
-  // ── 7: Role assignment ──────────────────────────────────────
+  // ── 7: Role assignments ─────────────────────────────────────
+  // "Cognitive Services OpenAI User" covers the /openai/ inference path (chat
+  // / analyze models). "Cognitive Services User" additionally covers the MAI
+  // image surface (…services.ai.azure.com/mai/v1/images/generations), which
+  // the OpenAI-User role does NOT authorize — image models 401/403 without it.
+  // Assign both so any role in models[] works.
   steps.start(7);
   try {
+    const roles = ["Cognitive Services OpenAI User", "Cognitive Services User"];
     const delaySeconds = [0, 15, 15, 20, 30];
-    let assigned = false;
-    for (let attempt = 0; attempt < delaySeconds.length; attempt++) {
-      if (delaySeconds[attempt] > 0) {
-        steps.update(
-          7,
-          `waiting ${delaySeconds[attempt]}s for identity propagation (try ${attempt + 1}/${delaySeconds.length})…`
-        );
-        await new Promise((r) => setTimeout(r, delaySeconds[attempt] * 1000));
-      }
-      try {
-        await exec(
-          `az role assignment create ` +
-            `--assignee ${principalId} ` +
-            `--role "Cognitive Services OpenAI User" ` +
-            `--scope ${aiResourceId} ` +
-            `--output none`,
-          { silent: true }
-        );
-        steps.done(7, "Cognitive Services OpenAI User");
-        assigned = true;
-        break;
-      } catch (error) {
-        if (error.message.includes("already exists")) {
-          steps.done(7, "Cognitive Services OpenAI User  (already existed)");
+    for (const role of roles) {
+      let assigned = false;
+      for (let attempt = 0; attempt < delaySeconds.length; attempt++) {
+        if (delaySeconds[attempt] > 0) {
+          steps.update(
+            7,
+            `waiting ${delaySeconds[attempt]}s for identity propagation (${role}, try ${attempt + 1}/${delaySeconds.length})…`
+          );
+          await new Promise((r) => setTimeout(r, delaySeconds[attempt] * 1000));
+        }
+        try {
+          await exec(
+            `az role assignment create ` +
+              `--assignee ${principalId} ` +
+              `--role "${role}" ` +
+              `--scope ${aiResourceId} ` +
+              `--output none`,
+            { silent: true }
+          );
           assigned = true;
           break;
+        } catch (error) {
+          if (error.message.includes("already exists")) {
+            assigned = true;
+            break;
+          }
+          if (
+            error.message.includes("Cannot find user or service principal") &&
+            attempt < delaySeconds.length - 1
+          ) {
+            continue;
+          }
+          bail(steps, 7, error);
+          return;
         }
-        if (
-          error.message.includes("Cannot find user or service principal") &&
-          attempt < delaySeconds.length - 1
-        ) {
-          continue;
-        }
-        bail(steps, 7, error);
+      }
+      if (!assigned) {
+        bail(steps, 7, new Error(`Role assignment failed after all retries: ${role}`));
         return;
       }
     }
-    if (!assigned) {
-      bail(steps, 7, new Error("Role assignment failed after all retries."));
-    }
+    steps.done(7, roles.join(" + "));
   } catch (e) {
     bail(steps, 7, e);
   }
