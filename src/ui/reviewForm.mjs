@@ -229,3 +229,143 @@ export function buildPlanSummary() {
     "Easy Auth → Code deploy → Health check"
   );
 }
+
+// ── Multi-model review form ─────────────────────────────────────
+// Same one-screen editable form as the single-model flow, but the model
+// picker is removed (deployments are declared explicitly in config.models[])
+// and prefix edits re-derive every name EXCEPT deployment names (those are
+// fixed per model in config).
+
+function applyDerivedNamesMulti(state) {
+  // Second arg is unused for naming except the deploymentName, which
+  // multi-model ignores (each model carries its own deploymentName).
+  const names = deriveNames(state.namePrefix, state.namePrefix);
+  state.resourceGroup = names.resourceGroup;
+  state.aiServicesName = names.aiServicesName;
+  state.functionAppName = names.functionAppName;
+  state.storageName = names.storageName;
+  state.backendApiAppDisplayName = names.backendApiAppDisplayName;
+}
+
+const FIELDS_MULTI = [
+  {
+    key: "subscriptionLabel",
+    label: "Subscription",
+    edit: async (state) => {
+      const sub = await pickSubscription();
+      state.subscriptionId = sub.subscriptionId;
+      state.tenantId = sub.tenantId;
+      state.subscriptionName = sub.name;
+      state.subscriptionLabel = `${sub.name}  ${sub.subscriptionId}`;
+    },
+  },
+  {
+    key: "namePrefix",
+    label: "Resource prefix",
+    edit: async (state) => {
+      state.namePrefix = await pickPrefix(state.namePrefix);
+      applyDerivedNamesMulti(state);
+      log(`  ${colors.dim}Re-derived RG / AI / Function App / Storage names from new prefix.${colors.reset}`);
+    },
+  },
+  {
+    key: "regionLabel",
+    label: "Region",
+    edit: async (state) => {
+      state.location = await pickRegion(state.location);
+      state.regionLabel = state.location;
+    },
+  },
+  {
+    key: "resourceGroup",
+    label: "Resource Group",
+    edit: async (state) => { state.resourceGroup = await ask("Resource Group", state.resourceGroup); },
+  },
+  {
+    key: "aiServicesName",
+    label: "AI Services",
+    edit: async (state) => { state.aiServicesName = await ask("AI Services name", state.aiServicesName); },
+  },
+  {
+    key: "functionAppName",
+    label: "Function App",
+    edit: async (state) => { state.functionAppName = await ask("Function App name", state.functionAppName); },
+  },
+  {
+    key: "storageName",
+    label: "Storage",
+    edit: async (state) => { state.storageName = await ask("Storage Account name", state.storageName); },
+  },
+  {
+    key: "sharepointOrigin",
+    label: "SharePoint origin",
+    edit: async (state) => { state.sharepointOrigin = await askSharePointOrigin(); },
+  },
+];
+
+const REQUIRED_KEYS_MULTI = [
+  "subscriptionLabel", "namePrefix", "location",
+  "resourceGroup", "aiServicesName", "functionAppName", "storageName", "sharepointOrigin",
+];
+
+function renderMultiModelForm(state, ctx) {
+  log(`\n  ${colors.bold}Configuration:${colors.reset}`);
+  FIELDS_MULTI.forEach((f, i) => {
+    let value = f.key === "regionLabel" ? state.location : state[f.key];
+    if (!value) value = `${colors.dim}(empty)${colors.reset}`;
+    log(`    [${i + 1}] ${pad(f.label, 18)}  ${value}`);
+  });
+
+  log(`\n  ${colors.bold}Models${colors.reset} ${colors.dim}(fixed — from deploy.config.json):${colors.reset}`);
+  for (const m of ctx.models || []) {
+    const role = m.$role || m.role || "?";
+    logInfo(`${pad(role, 10)} ${m.name} → ${m.deploymentName}${m.apiVersion ? `  (api ${m.apiVersion})` : ""}`);
+  }
+  logInfo(`Backend API app     ${state.backendApiAppDisplayName || "(pending)"}`);
+  if (ctx.requestLimits) {
+    logInfo(`App rate limits     ${ctx.requestLimits.perMinute} req/min · ${ctx.requestLimits.perDay} req/day`);
+  }
+
+  log(
+    `\n  ${colors.cyan}[number]${colors.reset} edit field   ` +
+      `${colors.cyan}[d]${colors.reset} deploy   ` +
+      `${colors.cyan}[q]${colors.reset} quit`
+  );
+}
+
+export async function runMultiModelReviewForm(state, ctx) {
+  while (true) {
+    renderMultiModelForm(state, ctx);
+    const choice = (await prompt("  > ")).toLowerCase();
+
+    if (choice === "q" || choice === "quit") return false;
+    if (choice === "d" || choice === "deploy") {
+      const missing = REQUIRED_KEYS_MULTI.filter((k) => !state[k]);
+      if (missing.length > 0) {
+        log(`\n  ${colors.red}Missing values:${colors.reset} ${missing.join(", ")}`);
+        log(`  Edit them before deploying.\n`);
+        continue;
+      }
+      return true;
+    }
+    if (choice === "" || choice === "?" || choice === "h") continue;
+
+    const n = Number(choice);
+    if (!Number.isInteger(n) || n < 1 || n > FIELDS_MULTI.length) {
+      log(`\n  ${colors.yellow}Unrecognised input.${colors.reset} Type 1-${FIELDS_MULTI.length} to edit, 'd' to deploy, 'q' to quit.\n`);
+      continue;
+    }
+
+    log("");
+    try {
+      await FIELDS_MULTI[n - 1].edit(state);
+    } catch (error) {
+      if ((error.message || "").includes("cancelled")) {
+        log(`\n  ${colors.yellow}Edit cancelled.${colors.reset}\n`);
+      } else {
+        log(`\n  ${colors.red}Edit failed:${colors.reset} ${error.message}\n`);
+      }
+    }
+    log("");
+  }
+}

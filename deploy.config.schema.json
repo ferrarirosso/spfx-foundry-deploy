@@ -10,8 +10,8 @@
     },
     "profile": {
       "type": "string",
-      "enum": ["chat-completions"],
-      "description": "Provisioning recipe. Currently only 'chat-completions'. Defaults to 'chat-completions'."
+      "enum": ["chat-completions", "multi-model"],
+      "description": "Provisioning recipe. 'chat-completions' (default) provisions one model deployment behind the proxy and writes the singular AZURE_OPENAI_DEPLOYMENT app setting. 'multi-model' provisions N deployments from 'models[]' and writes role-named AZURE_OPENAI_DEPLOYMENT_<ROLE> / AZURE_OPENAI_API_VERSION_<ROLE> settings; the single-model path is unaffected."
     },
     "namePrefix": {
       "type": "string",
@@ -23,13 +23,40 @@
     },
     "model": {
       "type": "object",
-      "description": "Default model. The deploy form lets the user pick a different one from those available in the chosen region.",
+      "description": "chat-completions profile only — default single model. The deploy form lets the user pick a different one from those available in the chosen region.",
       "properties": {
         "name": {
           "type": "string",
           "description": "Model family name, e.g. 'gpt-5-mini', 'gpt-4o-mini'. Defaults to gpt-5-mini if available."
         }
       }
+    },
+    "models": {
+      "type": "array",
+      "description": "multi-model profile only — the deployments to create on the AOAI/Foundry account. No interactive picker; declared explicitly. Each gets a role-named app setting (AZURE_OPENAI_DEPLOYMENT_<ROLE>, uppercased $role) plus AZURE_OPENAI_API_VERSION_<ROLE> when apiVersion is set. The single shared AZURE_OPENAI_ENDPOINT is also written; backends derive any provider-specific endpoint from it.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Model family name, e.g. 'gpt-5-mini', 'MAI-Image-2e'." },
+          "deploymentName": { "type": "string", "description": "Explicit deployment name created on the account." },
+          "version": { "type": "string", "description": "Model version. Omit to let Azure pick the default." },
+          "format": { "type": "string", "description": "Model format passed to az (e.g. 'OpenAI', 'Microsoft'). Defaults to 'OpenAI'." },
+          "skuName": { "type": "string", "description": "Defaults to 'GlobalStandard'." },
+          "skuCapacity": { "type": "number", "description": "Defaults to 50." },
+          "apiVersion": { "type": "string", "description": "Per-role API version, written as AZURE_OPENAI_API_VERSION_<ROLE>." },
+          "dimensions": { "type": "number", "description": "Embedding dimensions, if applicable." },
+          "$role": { "type": "string", "description": "Role tag the backend uses to pick this deployment, e.g. 'image', 'analyze', 'router', 'embeddings'. Uppercased into the app-setting suffix." }
+        },
+        "required": ["name", "deploymentName"]
+      }
+    },
+    "sharepointOrigin": {
+      "type": "string",
+      "description": "Origin used in App Service CORS + ALLOWED_ORIGIN. Must match the SharePoint tenant origin hosting the SPFx component. If omitted, the deployer suggests/prompts one."
+    },
+    "backendPath": {
+      "type": "string",
+      "description": "Path to the Azure Functions backend, relative to this config file. Defaults to '<webpartDir>/backend'. Set it when the SPFx solution and the Function backend live in separate folders (e.g. config in spfx/, backend at ../backend)."
     },
     "requestLimits": {
       "type": "object",

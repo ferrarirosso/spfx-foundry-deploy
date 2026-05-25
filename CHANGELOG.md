@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.0 — 2026-05-25
+
+Adds multi-model deployments without changing the single-model path.
+
+### Added
+
+- **`multi-model` profile.** Provisions N model deployments on one Foundry
+  account from a `models[]` array (each `{ name, deploymentName, version?,
+  format?, skuName?, skuCapacity?, apiVersion?, $role }`). Writes one app
+  setting per role — `AZURE_OPENAI_DEPLOYMENT_<ROLE>` (uppercased `$role`) and
+  `AZURE_OPENAI_API_VERSION_<ROLE>` when `apiVersion` is set — plus the shared
+  `AZURE_OPENAI_ENDPOINT`. Per-model `format` supports non-OpenAI deployments
+  (e.g. `Microsoft` for MAI image models). No interactive picker; models are
+  declared explicitly. `.deploy-output.json` gains a `deployments[]` array
+  (role → deploymentName).
+- Selected via `"profile": "multi-model"` in `deploy.config.json`. Routed
+  through a separate path in `bin/deploy.mjs`; the single-model
+  `chat-completions` flow (picker, review form, singular `AZURE_OPENAI_DEPLOYMENT`)
+  is **byte-for-byte unchanged**, so existing single-model consumers are
+  unaffected.
+
+### Compatibility
+
+- `chat-completions` (single model) is the default and behaves exactly as in
+  0.1.0 — same prompts, same app settings, same `.deploy-output.json` fields.
+
 ## 0.1.0 — 2026-04-27
 
 Initial public release.

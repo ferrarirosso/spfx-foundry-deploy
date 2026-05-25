@@ -122,12 +122,39 @@ Every field is optional. Full schema: [`deploy.config.schema.json`](./deploy.con
 | Field | Effect |
 |---|---|
 | `slug` | Stable identifier — keys `.deploy-output.json` so multiple webparts in one repo can coexist. Defaults to your `package.json` `name` field (with `@scope/` stripped). |
-| `profile` | Provisioning recipe. Currently always `chat-completions`. Defaults to `chat-completions`. |
+| `profile` | Provisioning recipe: `chat-completions` (default, single model) or `multi-model` (N deployments — see below). |
 | `namePrefix` | Drives every Azure resource name. The deploy form lets you regenerate or edit at run time. Defaults to `slug`. |
 | `location` | Default region. The form lets you change it; the model picker re-validates against the new region. Defaults to `swedencentral`. |
-| `model.name` | Default model. The form's region-scoped picker shows what's actually available. Defaults to `gpt-5-mini`. |
+| `model.name` | `chat-completions` only — default single model. The form's region-scoped picker shows what's actually available. Defaults to `gpt-5-mini`. |
+| `models[]` | `multi-model` only — the deployments to create (`{ name, deploymentName, version?, format?, skuName?, skuCapacity?, apiVersion?, $role }`). See below. |
 | `requestLimits.perMinute` / `perDay` | Per-caller rate limits enforced by the proxy. Defaults: 30/min, 1000/day. |
 | `serveProperties` | Extra string properties merged into the patched `serve.json`. Empty-string values are prompted for at deploy time (useful for per-tenant GUIDs like an MCP `environmentId`). |
+
+### `multi-model` profile
+
+For solutions that need more than one deployment behind the proxy (e.g. a chat
+model plus an image or embeddings model). Set `"profile": "multi-model"` and
+declare the deployments in `models[]` — there's no interactive picker:
+
+```jsonc
+{
+  "slug": "imageo",
+  "profile": "multi-model",
+  "namePrefix": "imageo-dev",
+  "location": "swedencentral",
+  "models": [
+    { "name": "gpt-5-mini",   "deploymentName": "imageo-dev-gpt5mini", "version": "2025-08-07", "format": "OpenAI",    "apiVersion": "2024-10-21",        "$role": "analyze" },
+    { "name": "MAI-Image-2e", "deploymentName": "imageo-dev-mai2eff",  "version": "2026-04-09", "format": "Microsoft", "apiVersion": "2026-04-01-preview", "$role": "image" }
+  ]
+}
+```
+
+Each model gets `AZURE_OPENAI_DEPLOYMENT_<ROLE>` (uppercased `$role`) and, when
+`apiVersion` is set, `AZURE_OPENAI_API_VERSION_<ROLE>`. The shared
+`AZURE_OPENAI_ENDPOINT` is written too; backends derive any provider-specific
+endpoint (e.g. the MAI image endpoint) from it. The single-model
+`chat-completions` path is unaffected — same prompts, same singular
+`AZURE_OPENAI_DEPLOYMENT`.
 
 ## Security posture
 
