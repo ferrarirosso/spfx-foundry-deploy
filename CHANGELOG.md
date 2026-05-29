@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.3.0 — 2026-05-29
+
+Security hardening of the deployer tooling and the resources it provisions.
+
+### Fixed (security)
+
+- **Command injection (critical).** Every `az`/`func` invocation now runs via
+  `execFile` with an explicit argument vector — there is no shell, so values
+  from `deploy.config.json` / `package.json` / `.deploy-output.json`
+  (model names, region, prefix, deployment names, app ids, …) can no longer be
+  interpreted as shell syntax (`;`, `$(...)`, backticks, quotes, redirection
+  are all inert). Previously these values were interpolated into shell command
+  strings, so a hostile committed config in a cloned webpart repo could execute
+  arbitrary code on the deploying machine the moment `npm run deploy`/`teardown`
+  ran. The string-based `exec`/`execLive`/`shellQuote` helpers are removed.
+- **Defense-in-depth config validation.** `deploy` and `teardown` reject
+  malformed config values early (region, prefix, model/deployment names,
+  versions, sku/limits, Entra app GUID) with a clear message. Patterns accept
+  every existing consumer config.
+- **Error output no longer echoes command args.** Failed commands surface the
+  child's stderr and a redacted label (subcommand verbs only), never the full
+  argument vector — so secrets like an App Insights connection string can't
+  leak into an error message.
+
+### Added (hardening)
+
+- **Passwordless-only to Foundry.** Newly created AI Services accounts get
+  `properties.disableLocalAuth = true` — key/local auth is off, managed
+  identity is the only path. Deployed backends already use MI, so they are
+  unaffected; key-based **local** dev (`func start`) must switch to
+  `az login` + `DefaultAzureCredential`. Existing accounts are left untouched
+  unless you pass the new `--harden-existing` flag.
+- **Diagnostics → Log Analytics.** A per-resource-group Log Analytics
+  workspace is provisioned and diagnostic settings route the Function App, AI
+  Services account, and storage account logs/metrics to it. Application
+  Insights is now **workspace-based** (the modern default; classic key-only
+  mode is deprecated).
+- **Storage account hardening.** Created with `--min-tls-version TLS1_2` and
+  `--allow-blob-public-access false`. The Functions host still uses the shared
+  key for its content share (Linux Consumption limitation), so shared-key
+  access stays enabled — fully keyless host storage would require Flex
+  Consumption.
+- **`--harden-existing` flag (`deploy`).** Opt-in: also apply the
+  create-only hardening (disableLocalAuth, storage TLS/no-public-blob) to
+  resources that already exist. Off by default so a routine redeploy never
+  silently flips a running resource.
+
+### Compatibility
+
+- The CLI surface, config schema, `.deploy-output.json` shape, and `serve.json`
+  wiring are unchanged. For a **new** deploy these are pure improvements. For a
+  **redeploy** of an existing solution, behavior is unchanged unless you pass
+  `--harden-existing`; the new diagnostic settings + workspace-based App
+  Insights are additive.
+
 ## 0.2.1 — 2026-05-25
 
 ### Fixed

@@ -1,4 +1,4 @@
-import { exec, parseJsonOutput } from "../lib/exec.mjs";
+import { run, parseJsonOutput } from "../lib/exec.mjs";
 import { logInfo, colors } from "../lib/log.mjs";
 import { pickFromList } from "./menu.mjs";
 import { ask } from "../lib/ask.mjs";
@@ -19,8 +19,13 @@ const FOUNDRY_REGIONS_BY_PRIORITY = [
 
 async function listAllRegions() {
   return parseJsonOutput(
-    await exec(
-      `az account list-locations --query "[?metadata.regionType=='Physical'].{name:name,displayName:displayName}" --output json`,
+    await run(
+      "az",
+      [
+        "account", "list-locations",
+        "--query", "[?metadata.regionType=='Physical'].{name:name,displayName:displayName}",
+        "--output", "json",
+      ],
       { silent: true, ignoreError: true }
     ),
     []

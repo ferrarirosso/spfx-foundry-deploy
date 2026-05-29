@@ -8,10 +8,13 @@
 - Storage Account + Function App (Node 22, Linux, Consumption)
 - Backend API Entra app + `user_impersonation` scope + SPFx tenant-wide grant
   (so `AadTokenProvider.getToken("api://<backend-app-id>")` just works)
-- Managed identity to Foundry (`Cognitive Services OpenAI User` role)
+- Managed identity to Foundry (`Cognitive Services OpenAI User` role); the
+  Foundry account is created with key/local auth **disabled** (managed identity only)
 - Easy Auth in **Entra-required, return-401** mode (audience-pinned to the Backend API)
-- Platform hardening: HTTPS-only, TLS 1.2, FTP disabled
-- Application Insights wired
+- Platform hardening: HTTPS-only, TLS 1.2, FTP disabled; storage account on
+  TLS 1.2 with anonymous blob access off
+- Workspace-based Application Insights + diagnostic settings to a Log Analytics
+  workspace (Function App, Foundry, storage)
 
 Then it patches the calling web part's `config/serve.json` with the
 endpoint URL and Backend API resource so `npm start` opens the workbench
@@ -81,14 +84,16 @@ your tracked `deploy.config.json` stays clean.
 
 ```
 Resource Group
-├── AI Foundry account (kind: AIServices)
+├── AI Foundry account (kind: AIServices; local/key auth disabled — MI only)
 │   └── gpt-5-mini deployment (GlobalStandard, default capacity)
-├── Storage Account (Standard_LRS)
+├── Storage Account (Standard_LRS; TLS 1.2, anonymous blob access off)
+├── Log Analytics workspace (<prefix>-logs)
 ├── Function App (Node 22, Linux, Consumption)
 │   ├── System-assigned managed identity
 │   │   └── role: Cognitive Services OpenAI User on the AI Foundry resource
 │   ├── Easy Auth: require auth, audience = api://<backend-app-id>, return 401
-│   └── App Insights connection string (telemetry on)
+│   └── Workspace-based App Insights + diagnostic settings → Log Analytics
+│       (Function App, Foundry account, storage account)
 └── (Resource group also indirectly tracks the Backend API Entra app —
      the Entra app lives in your tenant, not in the RG, so teardown
      offers to delete it separately.)
@@ -110,6 +115,7 @@ Common flags:
 | `--config <path>` | all | Optional. Path to a `deploy.config.json`. When omitted, slug is inferred from `package.json` and profile defaults to `chat-completions`. |
 | `--dry-run` | `deploy` | Walk through the form, print the plan, no Azure calls. |
 | `--no-wire` | `deploy` | Skip the `serve.json` patch. |
+| `--harden-existing` | `deploy` | Also apply create-only hardening (disable Foundry key auth, storage TLS/no-public-blob) to resources that **already exist**. Off by default so routine redeploys don't flip a running resource. |
 | `--keep-app` | `teardown` | Don't delete the Backend API Entra app. |
 | `--no-purge` | `teardown` | Skip the AI Services soft-delete purge. |
 | `--keep-rg` | `teardown` | Don't delete the resource group. |
@@ -166,10 +172,12 @@ In bullets:
 - **Authentication**: Easy Auth (`requireAuthentication: true`, `Return401`), audience-pinned to the Backend API.
 - **Authorization**: deployer creates one app role per deployment (`<namePrefix>.User`); proxy returns 403 if missing.
 - **Default-deny in production**: runtime throws at startup if `WEBSITE_INSTANCE_ID` is set and `REQUIRED_APP_ROLE` is empty (unless `ALLOW_ANONYMOUS_AUTHZ=true` is the explicit opt-out).
-- **Keyless to Foundry**: managed identity only; throws if `AZURE_OPENAI_API_KEY` is set on a deployed Function App.
+- **Keyless to Foundry**: managed identity only. The Foundry account is created with `disableLocalAuth: true` (key auth off at the resource), and the backend throws if `AZURE_OPENAI_API_KEY` is set on a deployed Function App. (Local `func start` against such an account must use `az login` + `DefaultAzureCredential`, not a key.)
 - **CORS**: locked down to your SharePoint tenant origin (App Service CORS layer + in-app validation).
-- **Platform**: HTTPS-only, TLS 1.2, FTP off, App Insights.
-- **Diagnostics**: `/health` is `{ status, time }`. Chat responses surface only a correlation id and rate-limit hints — no caller id, deployment name, or auth-method leaks.
+- **Platform**: HTTPS-only, TLS 1.2, FTP off. Storage account on TLS 1.2 with anonymous blob access disabled (the Functions host still uses the storage key for its content share — a Linux Consumption limitation).
+- **Audit logging**: every provisioned resource (Function App, Foundry account, storage) sends logs + metrics to a per-resource-group Log Analytics workspace via diagnostic settings; App Insights is workspace-based.
+- **Shell-free tooling**: the deployer invokes `az`/`func` via `execFile` argument vectors — no shell — so nothing in a `deploy.config.json` / `package.json` / `.deploy-output.json` can inject commands on the deploying machine. Config values are additionally pattern-validated before any Azure call.
+- **Result diagnostics**: `/health` is `{ status, time }`. Chat responses surface only a correlation id and rate-limit hints — no caller id, deployment name, or auth-method leaks.
 
 Manual admin steps (one-time per tenant):
 - Approve the SPFx → Backend API grant (deployer auto-grants via Graph; manual fallback URL printed if it can't).
@@ -177,6 +185,29 @@ Manual admin steps (one-time per tenant):
 - Approve any `webApiPermissionRequests` from the .sppkg in SharePoint Admin Center.
 
 Full breakdown in [`CHANGELOG.md`](./CHANGELOG.md).
+
+## Upgrading & redeploy behavior
+
+The deployer is idempotent — re-running `deploy` reconciles existing resources
+rather than recreating them. Most consumers invoke it via
+`npx github:ferrarirosso/spfx-foundry-deploy` (which tracks `main`), so the next
+deploy after an upgrade picks up the current behavior. What a redeploy does to
+an **already-deployed** solution:
+
+- **Plain redeploy (no flags) is additive.** It wires the Log Analytics
+  workspace + diagnostic settings and re-asserts platform hardening, but does
+  **not** change auth on resources that already exist: the Foundry account's
+  key-auth state and the storage account's TLS / public-access settings are left
+  as-is, and an existing classic Application Insights component is untouched.
+  Nothing that could interrupt a running app is flipped.
+- **`deploy --harden-existing`** additionally applies the create-only hardening
+  to existing resources — disables key/local auth on the Foundry account (read
+  back and confirmed; a loud warning prints if it didn't take) and sets TLS 1.2
+  + no-public-blob on the storage account. Run this once per solution when
+  you're ready to adopt the deeper hardening.
+
+New deploys are always fully hardened — `--harden-existing` only matters for
+resources provisioned by an earlier version.
 
 ## Output: `.deploy-output.json`
 

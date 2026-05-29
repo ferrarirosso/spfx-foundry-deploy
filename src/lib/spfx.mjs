@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { exec, shellQuote, parseJsonOutput } from "./exec.mjs";
+import { run, parseJsonOutput } from "./exec.mjs";
 import { logOk, logSkip, logInfo } from "./log.mjs";
 
 // SPFx first-party client — service principal exists in every tenant with SPO.
@@ -38,20 +38,24 @@ function buildAppRole(namePrefix, existingRoleId) {
 
 export async function ensureBackendApiApplication(displayName, namePrefix) {
   let app = parseJsonOutput(
-    await exec(
-      `az ad app list --display-name "${displayName}" --query "[0]" --output json`,
+    await run(
+      "az",
+      ["ad", "app", "list", "--display-name", displayName, "--query", "[0]", "--output", "json"],
       { silent: true, ignoreError: true }
     )
   );
 
   if (!app) {
     app = JSON.parse(
-      await exec(
-        `az ad app create ` +
-          `--display-name "${displayName}" ` +
-          `--sign-in-audience AzureADMyOrg ` +
-          `--requested-access-token-version 2 ` +
-          `--output json`,
+      await run(
+        "az",
+        [
+          "ad", "app", "create",
+          "--display-name", displayName,
+          "--sign-in-audience", "AzureADMyOrg",
+          "--requested-access-token-version", "2",
+          "--output", "json",
+        ],
         { silent: true }
       )
     );
@@ -61,10 +65,13 @@ export async function ensureBackendApiApplication(displayName, namePrefix) {
   }
 
   const graphApp = JSON.parse(
-    await exec(
-      `az rest --method GET ` +
-        `--uri "https://graph.microsoft.com/v1.0/applications/${app.id}?$select=id,appId,displayName,identifierUris,api,appRoles" ` +
-        `--output json`,
+    await run(
+      "az",
+      [
+        "rest", "--method", "GET",
+        "--uri", `https://graph.microsoft.com/v1.0/applications/${app.id}?$select=id,appId,displayName,identifierUris,api,appRoles`,
+        "--output", "json",
+      ],
       { silent: true }
     )
   );
@@ -87,29 +94,33 @@ export async function ensureBackendApiApplication(displayName, namePrefix) {
     appRoles: [buildAppRole(namePrefix, existingRole?.id)],
   };
 
-  await exec(
-    `az rest --method PATCH ` +
-      `--uri "https://graph.microsoft.com/v1.0/applications/${graphApp.id}" ` +
-      `--headers Content-Type=application/json ` +
-      `--body ${shellQuote(JSON.stringify(patchBody))} ` +
-      `--output none`,
+  await run(
+    "az",
+    [
+      "rest", "--method", "PATCH",
+      "--uri", `https://graph.microsoft.com/v1.0/applications/${graphApp.id}`,
+      "--headers", "Content-Type=application/json",
+      "--body", JSON.stringify(patchBody),
+      "--output", "none",
+    ],
     { silent: true }
   );
   logOk(`Configured API scope + '${roleValue}' app role on ${displayName}`);
 
   try {
-    await exec(`az ad sp show --id ${graphApp.appId} --output none`, { silent: true });
+    await run("az", ["ad", "sp", "show", "--id", graphApp.appId, "--output", "none"], { silent: true });
     logSkip(`${displayName} service principal`);
   } catch {
-    await exec(`az ad sp create --id ${graphApp.appId} --output none`, { silent: true });
+    await run("az", ["ad", "sp", "create", "--id", graphApp.appId, "--output", "none"], { silent: true });
     logOk(`Created service principal for ${displayName}`);
   }
 
   // Re-read the SP to get its objectId + the freshly-created role id.
   // Needed for the post-deploy "assign users to role" flow.
   const sp = JSON.parse(
-    await exec(
-      `az ad sp show --id ${graphApp.appId} --query "{id:id,appRoles:appRoles}" --output json`,
+    await run(
+      "az",
+      ["ad", "sp", "show", "--id", graphApp.appId, "--query", "{id:id,appRoles:appRoles}", "--output", "json"],
       { silent: true }
     )
   );
@@ -138,10 +149,10 @@ export async function tryAssignDeployingUserToRole(servicePrincipalId, appRoleId
   let upn;
   try {
     userId = (
-      await exec(`az ad signed-in-user show --query id --output tsv`, { silent: true })
+      await run("az", ["ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"], { silent: true })
     ).trim();
     upn = (
-      await exec(`az ad signed-in-user show --query userPrincipalName --output tsv`, {
+      await run("az", ["ad", "signed-in-user", "show", "--query", "userPrincipalName", "--output", "tsv"], {
         silent: true,
         ignoreError: true,
       })
@@ -158,12 +169,15 @@ export async function tryAssignDeployingUserToRole(servicePrincipalId, appRoleId
   });
 
   try {
-    await exec(
-      `az rest --method POST ` +
-        `--uri "https://graph.microsoft.com/v1.0/users/${userId}/appRoleAssignments" ` +
-        `--headers Content-Type=application/json ` +
-        `--body ${shellQuote(body)} ` +
-        `--output none`,
+    await run(
+      "az",
+      [
+        "rest", "--method", "POST",
+        "--uri", `https://graph.microsoft.com/v1.0/users/${userId}/appRoleAssignments`,
+        "--headers", "Content-Type=application/json",
+        "--body", body,
+        "--output", "none",
+      ],
       { silent: true }
     );
     return { status: "assigned", upn };
@@ -180,8 +194,9 @@ export async function tryAssignDeployingUserToRole(servicePrincipalId, appRoleId
 
 export async function ensureSpfxPermissionGrant(backendApiAppId) {
   const spfxSpId = parseJsonOutput(
-    await exec(
-      `az ad sp list --filter "appId eq '${SPFX_CLIENT_APP_ID}'" --query "[0].id" --output json`,
+    await run(
+      "az",
+      ["ad", "sp", "list", "--filter", `appId eq '${SPFX_CLIENT_APP_ID}'`, "--query", "[0].id", "--output", "json"],
       { silent: true, ignoreError: true }
     )
   );
@@ -193,8 +208,9 @@ export async function ensureSpfxPermissionGrant(backendApiAppId) {
   }
 
   const backendSpId = parseJsonOutput(
-    await exec(
-      `az ad sp list --filter "appId eq '${backendApiAppId}'" --query "[0].id" --output json`,
+    await run(
+      "az",
+      ["ad", "sp", "list", "--filter", `appId eq '${backendApiAppId}'`, "--query", "[0].id", "--output", "json"],
       { silent: true, ignoreError: true }
     )
   );
@@ -204,10 +220,14 @@ export async function ensureSpfxPermissionGrant(backendApiAppId) {
   }
 
   const existingGrants = JSON.parse(
-    (await exec(
-      `az rest --method GET ` +
-        `--uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\\$filter=clientId eq '${spfxSpId}' and resourceId eq '${backendSpId}'" ` +
-        `--query "value" --output json`,
+    (await run(
+      "az",
+      [
+        "rest", "--method", "GET",
+        "--uri", `https://graph.microsoft.com/v1.0/oauth2PermissionGrants?$filter=clientId eq '${spfxSpId}' and resourceId eq '${backendSpId}'`,
+        "--query", "value",
+        "--output", "json",
+      ],
       { silent: true, ignoreError: true }
     )) || "[]"
   );
@@ -228,12 +248,15 @@ export async function ensureSpfxPermissionGrant(backendApiAppId) {
     scope: SCOPE_VALUE,
   });
 
-  await exec(
-    `az rest --method POST ` +
-      `--uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants" ` +
-      `--headers Content-Type=application/json ` +
-      `--body ${shellQuote(grantBody)} ` +
-      `--output none`,
+  await run(
+    "az",
+    [
+      "rest", "--method", "POST",
+      "--uri", "https://graph.microsoft.com/v1.0/oauth2PermissionGrants",
+      "--headers", "Content-Type=application/json",
+      "--body", grantBody,
+      "--output", "none",
+    ],
     { silent: true }
   );
   logOk(`Granted SPFx → Backend API permission (${SCOPE_VALUE})`);
@@ -275,12 +298,15 @@ export async function configureFunctionAppEasyAuth({
     },
   };
 
-  await exec(
-    `az rest --method PUT ` +
-      `--uri "https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${functionAppName}/config/authsettingsV2?api-version=2023-12-01" ` +
-      `--headers Content-Type=application/json ` +
-      `--body ${shellQuote(JSON.stringify(authSettingsBody))} ` +
-      `--output none`,
+  await run(
+    "az",
+    [
+      "rest", "--method", "PUT",
+      "--uri", `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${functionAppName}/config/authsettingsV2?api-version=2023-12-01`,
+      "--headers", "Content-Type=application/json",
+      "--body", JSON.stringify(authSettingsBody),
+      "--output", "none",
+    ],
     { silent: true }
   );
 }

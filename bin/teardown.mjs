@@ -22,10 +22,11 @@
  */
 
 import { resolve } from "node:path";
-import { exec, execLive, requireCommand } from "../src/lib/exec.mjs";
+import { run, requireCommand } from "../src/lib/exec.mjs";
 import { banner, log, logFail, logInfo, logOk, colors } from "../src/lib/log.mjs";
 import { ask, closePrompt } from "../src/lib/ask.mjs";
 import { loadOrInferConfig, findRepoRoot, parseArgs } from "../src/lib/config.mjs";
+import { validateTeardownTargets } from "../src/lib/validate.mjs";
 import { readDeployOutput, removeDeployOutput } from "../src/wiring/deployOutput.mjs";
 import {
   findSoftDeletedAiServices,
@@ -36,7 +37,7 @@ import { createStepList } from "../src/ui/stepList.mjs";
 
 async function rgExists(name) {
   try {
-    return (await exec(`az group exists --name ${name}`, { silent: true })) === "true";
+    return (await run("az", ["group", "exists", "--name", name], { silent: true })) === "true";
   } catch {
     return false;
   }
@@ -44,8 +45,9 @@ async function rgExists(name) {
 
 async function countResources(rg) {
   try {
-    const json = await exec(
-      `az resource list --resource-group ${rg} --query "length(@)" --output tsv`,
+    const json = await run(
+      "az",
+      ["resource", "list", "--resource-group", rg, "--query", "length(@)", "--output", "tsv"],
       { silent: true }
     );
     return parseInt(json, 10) || 0;
@@ -84,7 +86,7 @@ async function main() {
   // ── Prereqs ─────────────────────────────────────────────────
   requireCommand("az", "https://learn.microsoft.com/cli/azure/install-azure-cli");
   try {
-    await exec("az account show --output none", { silent: true });
+    await run("az", ["account", "show", "--output", "none"], { silent: true });
   } catch {
     logFail("Not logged in to Azure CLI. Run: az login");
     process.exit(1);
@@ -105,6 +107,11 @@ async function main() {
     slugData.backendApiAppDisplayName ||
     config.defaults?.backendApiAppDisplayName ||
     `${config.slug} Backend API`;
+
+  // Defense-in-depth: these identifiers come from .deploy-output.json /
+  // config.defaults. execFile means they can't inject, but a tampered file
+  // still shouldn't feed garbage to `az group delete` / `az ad app delete`.
+  validateTeardownTargets({ resourceGroup, aiServicesName, location, appId });
 
   const rgIsThere = await rgExists(resourceGroup);
   const rgCount = rgIsThere ? await countResources(resourceGroup) : 0;
@@ -180,11 +187,11 @@ async function main() {
       // --no-wait otherwise. Both go through async exec so the spinner ticks.
       if (wantPurge) {
         steps.update(0, "deleting (waiting for completion)…");
-        await exec(`az group delete --name ${resourceGroup} --yes`, { timeout: 600_000 });
+        await run("az", ["group", "delete", "--name", resourceGroup, "--yes"], { timeout: 600_000 });
         steps.done(0, "deleted");
       } else {
         steps.update(0, "delete initiated (background)…");
-        await exec(`az group delete --name ${resourceGroup} --yes --no-wait`);
+        await run("az", ["group", "delete", "--name", resourceGroup, "--yes", "--no-wait"]);
         steps.done(0, "delete initiated");
       }
     } catch (error) {
@@ -215,7 +222,7 @@ async function main() {
   if (!items[2].skip) {
     steps.start(2);
     try {
-      await exec(`az ad app delete --id ${appId} --output none`, { silent: true });
+      await run("az", ["ad", "app", "delete", "--id", appId, "--output", "none"], { silent: true });
       steps.done(2, "deleted");
     } catch (error) {
       steps.fail(2, (error.message || String(error)).split("\n").pop());

@@ -51,6 +51,7 @@ function help() {
       "                      \"chat-completions\".",
       "  --dry-run           Render the form, print the plan, skip Azure calls (deploy only).",
       "  --no-wire           Skip the serve.json patch step (deploy only).",
+      "  --harden-existing   Apply create-only hardening to pre-existing resources (deploy).",
       "  --keep-app          Keep the Backend API Entra app registration (teardown).",
       "  --no-purge          Skip the AI Services soft-delete purge (teardown).",
       "  --keep-rg           Don't delete the resource group (teardown).",
