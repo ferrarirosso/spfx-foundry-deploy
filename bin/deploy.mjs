@@ -16,12 +16,15 @@
  *                         defaults to "chat-completions".
  *   --dry-run             Run prompts and print plan; do not call Azure.
  *   --no-wire             Skip the serve.json patch step.
+ *   --harden-existing     Also apply create-only hardening (disable Foundry key
+ *                         auth, storage TLS/no-public-blob) to resources that
+ *                         already exist. Off by default.
  *   --webpart <path>      Override the webpart dir (defaults to dirname(--config) or cwd).
  */
 
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { exec, parseJsonOutput, requireCommand } from "../src/lib/exec.mjs";
+import { run, parseJsonOutput, requireCommand } from "../src/lib/exec.mjs";
 import {
   banner,
   log,
@@ -32,6 +35,7 @@ import {
 } from "../src/lib/log.mjs";
 import { ask, closePrompt } from "../src/lib/ask.mjs";
 import { loadOrInferConfig, findRepoRoot, parseArgs } from "../src/lib/config.mjs";
+import { validateDeployConfig } from "../src/lib/validate.mjs";
 import { pickSubscription } from "../src/prompts/pickSubscription.mjs";
 import { suggestSharePointOrigin } from "../src/prompts/pickSharePointOrigin.mjs";
 import { listModelsInRegion } from "../src/prompts/pickModel.mjs";
@@ -79,7 +83,7 @@ async function pickInitialModel(location, configModelName) {
 // Multi-model flow: explicit config.models[], no model picker / review form.
 // Mirrors the single-model tail (deploy output + serve.json wiring + property
 // echo) so multi-model consumers get the same operator experience.
-async function runMultiModel({ config, args, account, sub, repoRoot, webpartDir, backendDir, isDryRun }) {
+async function runMultiModel({ config, args, account, sub, repoRoot, webpartDir, backendDir, isDryRun, hardenExisting }) {
   if (!Array.isArray(config.models) || config.models.length === 0) {
     logFail("Profile 'multi-model' requires a non-empty 'models' array in deploy.config.json.");
     process.exit(1);
@@ -153,6 +157,7 @@ async function runMultiModel({ config, args, account, sub, repoRoot, webpartDir,
     resolved,
     account: { subscriptionId: state.subscriptionId, tenantId: state.tenantId, name: account.user?.name },
     backendDir,
+    hardenExisting,
   });
 
   const outputPath = writeDeployOutput(repoRoot, config.slug, {
@@ -228,11 +233,26 @@ async function main() {
   const isDryRun =
     Boolean(args["dry-run"]) || process.env.npm_config_dry_run === "true";
 
+  // Opt-in: also apply create-only hardening (disableLocalAuth on Foundry,
+  // storage TLS/no-public-blob) to resources that already exist. Off by
+  // default so a routine redeploy never silently flips a running resource.
+  const hardenExisting = Boolean(args["harden-existing"]);
+
   const { config, configDir, configPath, inferred, slugSource, profileSource } =
     loadOrInferConfig(args.config);
   const profile = PROFILES[config.profile];
   if (!profile) {
     logFail(`Unknown profile: ${config.profile}. Known: ${Object.keys(PROFILES).join(", ")}`);
+    process.exit(1);
+  }
+
+  // Defense-in-depth: reject malformed config before any Azure work. (Command
+  // execution is already shell-free via execFile, so this is hygiene, not the
+  // security boundary.)
+  try {
+    validateDeployConfig(config);
+  } catch (error) {
+    logFail(error.message);
     process.exit(1);
   }
 
@@ -279,7 +299,7 @@ async function main() {
 
   // ── Azure login (interactive only if not already logged in) ─
   let account = parseJsonOutput(
-    await exec("az account show --output json", { silent: true, ignoreError: true })
+    await run("az", ["account", "show", "--output", "json"], { silent: true, ignoreError: true })
   );
   if (!account) {
     if (isDryRun) {
@@ -287,8 +307,8 @@ async function main() {
       process.exit(1);
     }
     logInfo("Not logged in. Opening browser for Azure login…");
-    await exec("az login --output none");
-    account = parseJsonOutput(await exec("az account show --output json", { silent: true }));
+    await run("az", ["login", "--output", "none"]);
+    account = parseJsonOutput(await run("az", ["account", "show", "--output", "json"], { silent: true }));
   }
   if (!account) {
     logFail("Could not detect Azure login.");
@@ -306,7 +326,7 @@ async function main() {
   // byte-for-byte unchanged for existing chat-completions consumers.
   if (config.profile === "multi-model") {
     await runMultiModel({
-      config, args, account, sub, repoRoot, webpartDir, backendDir, isDryRun,
+      config, args, account, sub, repoRoot, webpartDir, backendDir, isDryRun, hardenExisting,
     });
     return;
   }
@@ -404,6 +424,7 @@ async function main() {
     resolved,
     account: { subscriptionId, tenantId, name: account.user?.name },
     backendDir,
+    hardenExisting,
   });
 
   // ── Persist deploy output (always) ──────────────────────────

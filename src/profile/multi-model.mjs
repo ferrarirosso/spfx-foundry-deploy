@@ -1,4 +1,4 @@
-import { exec, execLive } from "../lib/exec.mjs";
+import { run, runLive } from "../lib/exec.mjs";
 import { banner, log, logInfo, colors } from "../lib/log.mjs";
 import { httpFetch } from "../lib/http.mjs";
 import {
@@ -10,7 +10,14 @@ import {
 import {
   findSoftDeletedAiServices,
   purgeSoftDeletedAiServices,
+  disableLocalAuthOnAccount,
+  disableLocalAuthHint,
 } from "../lib/aiServices.mjs";
+import {
+  ensureLogAnalyticsWorkspace,
+  ensureDiagnosticSetting,
+  resourceId,
+} from "../lib/diagnostics.mjs";
 import { createStepList } from "../ui/stepList.mjs";
 
 /**
@@ -45,7 +52,7 @@ const STEP_LABELS = [
   "App settings",
   "Easy Auth",
   "Platform hardening",
-  "Application Insights",
+  "Telemetry & diagnostics",
   "Health check",
 ];
 
@@ -69,6 +76,7 @@ export async function deployMultiModelBackend({
   resolved,
   account,
   backendDir,
+  hardenExisting = false,
 }) {
   const { subscriptionId, tenantId } = account;
   const {
@@ -106,11 +114,11 @@ export async function deployMultiModelBackend({
   // ── 0: Resource Group ───────────────────────────────────────
   steps.start(0);
   try {
-    const exists = await exec(`az group exists --name ${resourceGroup}`, { silent: true });
+    const exists = await run("az", ["group", "exists", "--name", resourceGroup], { silent: true });
     if (exists === "true") {
       steps.done(0, `${resourceGroup}  (already existed)`);
     } else {
-      await exec(`az group create --name ${resourceGroup} --location ${location} --output none`);
+      await run("az", ["group", "create", "--name", resourceGroup, "--location", location, "--output", "none"]);
       steps.done(0, resourceGroup);
     }
   } catch (e) {
@@ -118,12 +126,16 @@ export async function deployMultiModelBackend({
   }
 
   // ── 1: AI Services ──────────────────────────────────────────
+  let aiServicesEndpoint;
+  let aiResourceId;
+  let localAuthWarnTarget = null; // set if we tried to disable key auth and it didn't take
   steps.start(1);
   try {
     let aiExists = false;
     try {
-      await exec(
-        `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       aiExists = true;
@@ -137,36 +149,52 @@ export async function deployMultiModelBackend({
         await purgeSoftDeletedAiServices(aiServicesName, location, resourceGroup);
       }
       steps.update(1, `creating '${aiServicesName}' (1-2 min)…`);
-      await exec(
-        `az cognitiveservices account create ` +
-          `--name ${aiServicesName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--location ${location} ` +
-          `--kind AIServices ` +
-          `--sku S0 ` +
-          `--custom-domain ${aiServicesName} ` +
-          `--yes ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "cognitiveservices", "account", "create",
+          "--name", aiServicesName,
+          "--resource-group", resourceGroup,
+          "--location", location,
+          "--kind", "AIServices",
+          "--sku", "S0",
+          "--custom-domain", aiServicesName,
+          "--yes",
+          "--output", "none",
+        ],
         { timeout: 180_000 }
       );
     }
-    steps.done(1, `${aiServicesName}${aiExists ? "  (already existed)" : ""}`);
+
+    aiResourceId = (
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--query", "id", "--output", "tsv"],
+        { silent: true }
+      )
+    ).trim();
+    aiServicesEndpoint = (
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--query", "properties.endpoint", "--output", "tsv"],
+        { silent: true }
+      )
+    ).trim();
+
+    let authNote = "";
+    if (!aiExists || hardenExisting) {
+      const disabled = await disableLocalAuthOnAccount(aiResourceId, aiServicesName, resourceGroup);
+      if (disabled) {
+        authNote = "  · key auth disabled";
+      } else {
+        authNote = `  · ${colors.yellow}⚠ key auth STILL ON${colors.reset}`;
+        localAuthWarnTarget = aiResourceId;
+      }
+    }
+    steps.done(1, `${aiServicesName}${aiExists ? "  (already existed)" : ""}${authNote}`);
   } catch (e) {
     bail(steps, 1, e);
   }
-
-  const aiServicesEndpoint = (
-    await exec(
-      `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --query properties.endpoint --output tsv`,
-      { silent: true }
-    )
-  ).trim();
-  const aiResourceId = (
-    await exec(
-      `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --query id --output tsv`,
-      { silent: true }
-    )
-  ).trim();
 
   // ── 2: Model deployments (×N) ───────────────────────────────
   steps.start(2);
@@ -174,32 +202,30 @@ export async function deployMultiModelBackend({
     for (const m of models) {
       let exists = false;
       try {
-        await exec(
-          `az cognitiveservices account deployment show ` +
-            `--name ${aiServicesName} ` +
-            `--resource-group ${resourceGroup} ` +
-            `--deployment-name ${m.deploymentName} ` +
-            `--output none`,
+        await run(
+          "az",
+          ["cognitiveservices", "account", "deployment", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--deployment-name", m.deploymentName, "--output", "none"],
           { silent: true }
         );
         exists = true;
       } catch { /* will create */ }
       if (!exists) {
         steps.update(2, `deploying ${m.name} → ${m.deploymentName}…`);
-        const versionFlag = m.version ? `--model-version "${m.version}" ` : "";
-        await exec(
-          `az cognitiveservices account deployment create ` +
-            `--name ${aiServicesName} ` +
-            `--resource-group ${resourceGroup} ` +
-            `--deployment-name ${m.deploymentName} ` +
-            `--model-name ${m.name} ` +
-            versionFlag +
-            `--model-format "${m.format}" ` +
-            `--sku-capacity ${m.skuCapacity} ` +
-            `--sku-name ${m.skuName} ` +
-            `--output none`,
-          { timeout: 180_000 }
+        const args = [
+          "cognitiveservices", "account", "deployment", "create",
+          "--name", aiServicesName,
+          "--resource-group", resourceGroup,
+          "--deployment-name", m.deploymentName,
+          "--model-name", m.name,
+        ];
+        if (m.version) args.push("--model-version", m.version);
+        args.push(
+          "--model-format", m.format,
+          "--sku-capacity", String(m.skuCapacity),
+          "--sku-name", m.skuName,
+          "--output", "none"
         );
+        await run("az", args, { timeout: 180_000 });
       }
     }
     steps.done(2, `${models.length} models: ${models.map((m) => m.deploymentName).join(", ")}`);
@@ -212,8 +238,9 @@ export async function deployMultiModelBackend({
   try {
     let storExists = false;
     try {
-      await exec(
-        `az storage account show --name ${storageName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["storage", "account", "show", "--name", storageName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       storExists = true;
@@ -221,17 +248,28 @@ export async function deployMultiModelBackend({
       /* create below */
     }
     if (!storExists) {
-      await exec(
-        `az storage account create ` +
-          `--name ${storageName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--location ${location} ` +
-          `--sku Standard_LRS ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "storage", "account", "create",
+          "--name", storageName,
+          "--resource-group", resourceGroup,
+          "--location", location,
+          "--sku", "Standard_LRS",
+          "--min-tls-version", "TLS1_2",
+          "--allow-blob-public-access", "false",
+          "--output", "none",
+        ],
         { timeout: 120_000 }
       );
+    } else if (hardenExisting) {
+      await run(
+        "az",
+        ["storage", "account", "update", "--name", storageName, "--resource-group", resourceGroup, "--min-tls-version", "TLS1_2", "--allow-blob-public-access", "false", "--output", "none"],
+        { silent: true, ignoreError: true }
+      );
     }
-    steps.done(3, `${storageName}${storExists ? "  (already existed)" : ""}`);
+    steps.done(3, `${storageName}${storExists ? "  (already existed)" : "  · TLS1.2 · no public blob"}`);
   } catch (e) {
     bail(steps, 3, e);
   }
@@ -241,8 +279,9 @@ export async function deployMultiModelBackend({
   try {
     let funcExists = false;
     try {
-      await exec(
-        `az functionapp show --name ${functionAppName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["functionapp", "show", "--name", functionAppName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       funcExists = true;
@@ -250,17 +289,20 @@ export async function deployMultiModelBackend({
       /* create below */
     }
     if (!funcExists) {
-      await exec(
-        `az functionapp create ` +
-          `--name ${functionAppName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--storage-account ${storageName} ` +
-          `--consumption-plan-location ${location} ` +
-          `--runtime node ` +
-          `--runtime-version 22 ` +
-          `--functions-version 4 ` +
-          `--os-type linux ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "functionapp", "create",
+          "--name", functionAppName,
+          "--resource-group", resourceGroup,
+          "--storage-account", storageName,
+          "--consumption-plan-location", location,
+          "--runtime", "node",
+          "--runtime-version", "22",
+          "--functions-version", "4",
+          "--os-type", "linux",
+          "--output", "none",
+        ],
         { timeout: 180_000 }
       );
     }
@@ -295,8 +337,9 @@ export async function deployMultiModelBackend({
   steps.start(6);
   let principalId;
   try {
-    const identityRaw = await exec(
-      `az functionapp identity assign --name ${functionAppName} --resource-group ${resourceGroup} --output json`,
+    const identityRaw = await run(
+      "az",
+      ["functionapp", "identity", "assign", "--name", functionAppName, "--resource-group", resourceGroup, "--output", "json"],
       { silent: true }
     );
     const identity = JSON.parse(identityRaw);
@@ -327,12 +370,9 @@ export async function deployMultiModelBackend({
           await new Promise((r) => setTimeout(r, delaySeconds[attempt] * 1000));
         }
         try {
-          await exec(
-            `az role assignment create ` +
-              `--assignee ${principalId} ` +
-              `--role "${role}" ` +
-              `--scope ${aiResourceId} ` +
-              `--output none`,
+          await run(
+            "az",
+            ["role", "assignment", "create", "--assignee", principalId, "--role", role, "--scope", aiResourceId, "--output", "none"],
             { silent: true }
           );
           assigned = true;
@@ -373,7 +413,7 @@ export async function deployMultiModelBackend({
   log("");
   process.chdir(backendDir);
   try {
-    execLive(`func azure functionapp publish ${functionAppName} --javascript --build remote`);
+    runLive("func", ["azure", "functionapp", "publish", functionAppName, "--javascript", "--build", "remote"]);
   } catch (e) {
     log("");
     log(`  ${colors.red}Code publish failed.${colors.reset}`);
@@ -403,12 +443,9 @@ export async function deployMultiModelBackend({
         settings.push(`AZURE_OPENAI_API_VERSION_${suffix}=${m.apiVersion}`);
       }
     }
-    await exec(
-      `az functionapp config appsettings set ` +
-        `--name ${functionAppName} ` +
-        `--resource-group ${resourceGroup} ` +
-        `--settings ${settings.map((s) => `"${s}"`).join(" ")} ` +
-        `--output none`,
+    await run(
+      "az",
+      ["functionapp", "config", "appsettings", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--settings", ...settings, "--output", "none"],
       { silent: true }
     );
     steps.done(9, `${settings.length} env vars`);
@@ -419,9 +456,9 @@ export async function deployMultiModelBackend({
   // ── 10: Easy Auth ───────────────────────────────────────────
   steps.start(10);
   try {
-    await exec(
-      `az functionapp cors add --name ${functionAppName} --resource-group ${resourceGroup} ` +
-        `--allowed-origins "${sharepointOrigin}" --output none`,
+    await run(
+      "az",
+      ["functionapp", "cors", "add", "--name", functionAppName, "--resource-group", resourceGroup, "--allowed-origins", sharepointOrigin, "--output", "none"],
       { silent: true, ignoreError: true }
     );
     await configureFunctionAppEasyAuth({
@@ -440,12 +477,14 @@ export async function deployMultiModelBackend({
   // ── 11: Platform hardening ──────────────────────────────────
   steps.start(11, "HTTPS-only · TLS 1.2 · FTP off…");
   try {
-    await exec(
-      `az functionapp update --name ${functionAppName} --resource-group ${resourceGroup} --set httpsOnly=true --output none`,
+    await run(
+      "az",
+      ["functionapp", "update", "--name", functionAppName, "--resource-group", resourceGroup, "--set", "httpsOnly=true", "--output", "none"],
       { silent: true }
     );
-    await exec(
-      `az functionapp config set --name ${functionAppName} --resource-group ${resourceGroup} --min-tls-version 1.2 --ftps-state Disabled --output none`,
+    await run(
+      "az",
+      ["functionapp", "config", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--min-tls-version", "1.2", "--ftps-state", "Disabled", "--output", "none"],
       { silent: true }
     );
     steps.done(11, "HTTPS-only · TLS 1.2 · FTP disabled");
@@ -453,30 +492,45 @@ export async function deployMultiModelBackend({
     bail(steps, 11, e);
   }
 
-  // ── 12: Application Insights ────────────────────────────────
-  steps.start(12, `provisioning ${functionAppName}-ai…`);
+  // ── 12: Telemetry & diagnostics ─────────────────────────────
+  steps.start(12, "Log Analytics + App Insights…");
   try {
     const aiInsightsName = `${functionAppName}-ai`.slice(0, 60);
-    await exec(
-      `az monitor app-insights component create --app ${aiInsightsName} --location ${location} --resource-group ${resourceGroup} --kind web --output none`,
-      { silent: true, ignoreError: true }
-    );
-    const connStringRaw = await exec(
-      `az monitor app-insights component show --app ${aiInsightsName} --resource-group ${resourceGroup} --query connectionString --output tsv`,
-      { silent: true }
-    );
-    const connString = connStringRaw.trim();
+    const workspaceId = await ensureLogAnalyticsWorkspace(resourceGroup, location, namePrefix);
+
+    const createArgs = ["monitor", "app-insights", "component", "create", "--app", aiInsightsName, "--location", location, "--resource-group", resourceGroup, "--kind", "web", "--output", "none"];
+    if (workspaceId) createArgs.push("--workspace", workspaceId);
+    await run("az", createArgs, { silent: true, ignoreError: true });
+
+    const connString = (
+      await run(
+        "az",
+        ["monitor", "app-insights", "component", "show", "--app", aiInsightsName, "--resource-group", resourceGroup, "--query", "connectionString", "--output", "tsv"],
+        { silent: true, ignoreError: true }
+      )
+    ).trim();
     if (connString) {
-      await exec(
-        `az functionapp config appsettings set --name ${functionAppName} --resource-group ${resourceGroup} --settings "APPLICATIONINSIGHTS_CONNECTION_STRING=${connString}" --output none`,
+      await run(
+        "az",
+        ["functionapp", "config", "appsettings", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--settings", `APPLICATIONINSIGHTS_CONNECTION_STRING=${connString}`, "--output", "none"],
         { silent: true }
       );
-      steps.done(12, aiInsightsName);
-    } else {
-      steps.done(12, "skipped (could not read connection string)");
     }
+
+    let diagCount = 0;
+    if (workspaceId) {
+      const funcId = await resourceId("functionapp", functionAppName, resourceGroup);
+      const storeId = await resourceId("storage", storageName, resourceGroup);
+      if (funcId && (await ensureDiagnosticSetting(funcId, workspaceId, { logs: true, metrics: true }))) diagCount++;
+      if (aiResourceId && (await ensureDiagnosticSetting(aiResourceId, workspaceId, { logs: true, metrics: true }))) diagCount++;
+      if (storeId && (await ensureDiagnosticSetting(storeId, workspaceId, { logs: false, metrics: true }))) diagCount++;
+    }
+    const note = workspaceId
+      ? `${aiInsightsName} → Log Analytics  (${diagCount} diag settings)`
+      : `${aiInsightsName}  (no workspace — App Insights only)`;
+    steps.done(12, note);
   } catch (e) {
-    steps.done(12, `skipped (${(e.message || String(e)).split("\n").pop()})`);
+    steps.done(12, `partial (${(e.message || String(e)).split("\n").pop()})`);
   }
 
   // ── 13: Health check ────────────────────────────────────────
@@ -513,6 +567,14 @@ export async function deployMultiModelBackend({
     log(`  ${colors.yellow}Required next step — assign users to the '${backendApiConfig.roleValue}' role:${colors.reset}`);
     logInfo(portalUrl);
     logInfo("Without an assignment, calls to the proxy return 403. This is the deliberate default-deny posture.");
+  }
+
+  if (localAuthWarnTarget) {
+    log("");
+    log(`  ${colors.yellow}⚠ Could not disable key (local) auth on the Foundry account — API keys are STILL ENABLED.${colors.reset}`);
+    logInfo("The proxy uses managed identity regardless, but a leaked/listed key would bypass the auth gate.");
+    logInfo("Fix it manually, then re-check:");
+    logInfo(disableLocalAuthHint(localAuthWarnTarget));
   }
 
   return {

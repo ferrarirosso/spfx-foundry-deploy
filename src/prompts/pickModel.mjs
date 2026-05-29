@@ -5,7 +5,7 @@
 // shows each option with its default SKU capacity so the user knows what
 // they're agreeing to deploy.
 
-import { exec, parseJsonOutput } from "../lib/exec.mjs";
+import { run, parseJsonOutput } from "../lib/exec.mjs";
 import { pickFromList } from "./menu.mjs";
 
 // We're a chat-completions proxy. Anything that doesn't speak that contract —
@@ -45,8 +45,9 @@ function isChatModel(name) {
 }
 
 export async function listModelsInRegion(location) {
-  const raw = await exec(
-    `az cognitiveservices model list --location ${location} --output json`,
+  const raw = await run(
+    "az",
+    ["cognitiveservices", "model", "list", "--location", location, "--output", "json"],
     { silent: true, ignoreError: true }
   );
   const all = parseJsonOutput(raw, []);

@@ -1,4 +1,4 @@
-import { exec, execLive } from "../lib/exec.mjs";
+import { run, runLive } from "../lib/exec.mjs";
 import { banner, log, logInfo, colors } from "../lib/log.mjs";
 import { httpFetch } from "../lib/http.mjs";
 import {
@@ -10,7 +10,14 @@ import {
 import {
   findSoftDeletedAiServices,
   purgeSoftDeletedAiServices,
+  disableLocalAuthOnAccount,
+  disableLocalAuthHint,
 } from "../lib/aiServices.mjs";
+import {
+  ensureLogAnalyticsWorkspace,
+  ensureDiagnosticSetting,
+  resourceId,
+} from "../lib/diagnostics.mjs";
 import { createStepList } from "../ui/stepList.mjs";
 import { modelUsesMaxCompletionTokens } from "../prompts/pickModel.mjs";
 
@@ -33,7 +40,7 @@ const STEP_LABELS = [
   "App settings",
   "Easy Auth",
   "Platform hardening",
-  "Application Insights",
+  "Telemetry & diagnostics",
   "Health check",
 ];
 
@@ -51,6 +58,7 @@ export async function deployChatCompletionsBackend({
   resolved,
   account,
   backendDir,
+  hardenExisting = false,
 }) {
   const { subscriptionId, tenantId } = account;
   const {
@@ -86,11 +94,11 @@ export async function deployChatCompletionsBackend({
   // ── 0: Resource Group ───────────────────────────────────────
   steps.start(0);
   try {
-    const exists = await exec(`az group exists --name ${resourceGroup}`, { silent: true });
+    const exists = await run("az", ["group", "exists", "--name", resourceGroup], { silent: true });
     if (exists === "true") {
       steps.done(0, `${resourceGroup}  (already existed)`);
     } else {
-      await exec(`az group create --name ${resourceGroup} --location ${location} --output none`);
+      await run("az", ["group", "create", "--name", resourceGroup, "--location", location, "--output", "none"]);
       steps.done(0, resourceGroup);
     }
   } catch (e) {
@@ -98,12 +106,16 @@ export async function deployChatCompletionsBackend({
   }
 
   // ── 1: AI Services ──────────────────────────────────────────
+  let aiServicesEndpoint;
+  let aiResourceId;
+  let localAuthWarnTarget = null; // set if we tried to disable key auth and it didn't take
   steps.start(1);
   try {
     let aiExists = false;
     try {
-      await exec(
-        `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       aiExists = true;
@@ -117,44 +129,66 @@ export async function deployChatCompletionsBackend({
         await purgeSoftDeletedAiServices(aiServicesName, location, resourceGroup);
       }
       steps.update(1, `creating '${aiServicesName}' (1-2 min)…`);
-      await exec(
-        `az cognitiveservices account create ` +
-          `--name ${aiServicesName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--location ${location} ` +
-          `--kind AIServices ` +
-          `--sku S0 ` +
-          `--custom-domain ${aiServicesName} ` +
-          `--yes ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "cognitiveservices", "account", "create",
+          "--name", aiServicesName,
+          "--resource-group", resourceGroup,
+          "--location", location,
+          "--kind", "AIServices",
+          "--sku", "S0",
+          "--custom-domain", aiServicesName,
+          "--yes",
+          "--output", "none",
+        ],
         { timeout: 180_000 }
       );
     }
-    steps.done(1, `${aiServicesName}${aiExists ? "  (already existed)" : ""}`);
+
+    aiResourceId = (
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--query", "id", "--output", "tsv"],
+        { silent: true }
+      )
+    ).trim();
+    aiServicesEndpoint = (
+      await run(
+        "az",
+        ["cognitiveservices", "account", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--query", "properties.endpoint", "--output", "tsv"],
+        { silent: true }
+      )
+    ).trim();
+
+    // Sec-2: passwordless-only to Foundry. Disable key/local auth on newly
+    // created accounts (or existing ones with --harden-existing). MI callers
+    // are unaffected; key-based local dev must switch to `az login`. The helper
+    // reads the property back and returns false if it didn't actually flip —
+    // we surface that loudly rather than claim a control that isn't in place.
+    let authNote = "";
+    if (!aiExists || hardenExisting) {
+      const disabled = await disableLocalAuthOnAccount(aiResourceId, aiServicesName, resourceGroup);
+      if (disabled) {
+        authNote = "  · key auth disabled";
+      } else {
+        authNote = `  · ${colors.yellow}⚠ key auth STILL ON${colors.reset}`;
+        localAuthWarnTarget = aiResourceId;
+      }
+    }
+    steps.done(1, `${aiServicesName}${aiExists ? "  (already existed)" : ""}${authNote}`);
   } catch (e) {
     bail(steps, 1, e);
   }
-
-  const aiServicesEndpoint = await exec(
-    `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --query properties.endpoint --output tsv`,
-    { silent: true }
-  );
-  const aiResourceId = await exec(
-    `az cognitiveservices account show --name ${aiServicesName} --resource-group ${resourceGroup} --query id --output tsv`,
-    { silent: true }
-  );
 
   // ── 2: Model deployment ─────────────────────────────────────
   steps.start(2, `${model.modelName} → ${model.deploymentName}`);
   try {
     let modelExists = false;
     try {
-      await exec(
-        `az cognitiveservices account deployment show ` +
-          `--name ${aiServicesName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--deployment-name ${model.deploymentName} ` +
-          `--output none`,
+      await run(
+        "az",
+        ["cognitiveservices", "account", "deployment", "show", "--name", aiServicesName, "--resource-group", resourceGroup, "--deployment-name", model.deploymentName, "--output", "none"],
         { silent: true }
       );
       modelExists = true;
@@ -163,17 +197,20 @@ export async function deployChatCompletionsBackend({
     }
     if (!modelExists) {
       steps.update(2, `deploying ${model.modelName} (${model.skuCapacity}K TPM)…`);
-      await exec(
-        `az cognitiveservices account deployment create ` +
-          `--name ${aiServicesName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--deployment-name ${model.deploymentName} ` +
-          `--model-name ${model.modelName} ` +
-          `--model-version "${model.modelVersion}" ` +
-          `--model-format "${model.modelFormat}" ` +
-          `--sku-capacity ${model.skuCapacity} ` +
-          `--sku-name ${model.skuName} ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "cognitiveservices", "account", "deployment", "create",
+          "--name", aiServicesName,
+          "--resource-group", resourceGroup,
+          "--deployment-name", model.deploymentName,
+          "--model-name", model.modelName,
+          "--model-version", model.modelVersion,
+          "--model-format", model.modelFormat,
+          "--sku-capacity", String(model.skuCapacity),
+          "--sku-name", model.skuName,
+          "--output", "none",
+        ],
         { timeout: 180_000 }
       );
     }
@@ -187,8 +224,9 @@ export async function deployChatCompletionsBackend({
   try {
     let storExists = false;
     try {
-      await exec(
-        `az storage account show --name ${storageName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["storage", "account", "show", "--name", storageName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       storExists = true;
@@ -196,17 +234,32 @@ export async function deployChatCompletionsBackend({
       /* create below */
     }
     if (!storExists) {
-      await exec(
-        `az storage account create ` +
-          `--name ${storageName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--location ${location} ` +
-          `--sku Standard_LRS ` +
-          `--output none`,
+      // Sec-7 (storage option C): harden the account at create — TLS 1.2 floor
+      // and no anonymous blob access. The Functions host still uses the shared
+      // key for its content share (Consumption limitation), so shared-key
+      // access stays enabled.
+      await run(
+        "az",
+        [
+          "storage", "account", "create",
+          "--name", storageName,
+          "--resource-group", resourceGroup,
+          "--location", location,
+          "--sku", "Standard_LRS",
+          "--min-tls-version", "TLS1_2",
+          "--allow-blob-public-access", "false",
+          "--output", "none",
+        ],
         { timeout: 120_000 }
       );
+    } else if (hardenExisting) {
+      await run(
+        "az",
+        ["storage", "account", "update", "--name", storageName, "--resource-group", resourceGroup, "--min-tls-version", "TLS1_2", "--allow-blob-public-access", "false", "--output", "none"],
+        { silent: true, ignoreError: true }
+      );
     }
-    steps.done(3, `${storageName}${storExists ? "  (already existed)" : ""}`);
+    steps.done(3, `${storageName}${storExists ? "  (already existed)" : "  · TLS1.2 · no public blob"}`);
   } catch (e) {
     bail(steps, 3, e);
   }
@@ -216,8 +269,9 @@ export async function deployChatCompletionsBackend({
   try {
     let funcExists = false;
     try {
-      await exec(
-        `az functionapp show --name ${functionAppName} --resource-group ${resourceGroup} --output none`,
+      await run(
+        "az",
+        ["functionapp", "show", "--name", functionAppName, "--resource-group", resourceGroup, "--output", "none"],
         { silent: true }
       );
       funcExists = true;
@@ -225,17 +279,20 @@ export async function deployChatCompletionsBackend({
       /* create below */
     }
     if (!funcExists) {
-      await exec(
-        `az functionapp create ` +
-          `--name ${functionAppName} ` +
-          `--resource-group ${resourceGroup} ` +
-          `--storage-account ${storageName} ` +
-          `--consumption-plan-location ${location} ` +
-          `--runtime node ` +
-          `--runtime-version 22 ` +
-          `--functions-version 4 ` +
-          `--os-type linux ` +
-          `--output none`,
+      await run(
+        "az",
+        [
+          "functionapp", "create",
+          "--name", functionAppName,
+          "--resource-group", resourceGroup,
+          "--storage-account", storageName,
+          "--consumption-plan-location", location,
+          "--runtime", "node",
+          "--runtime-version", "22",
+          "--functions-version", "4",
+          "--os-type", "linux",
+          "--output", "none",
+        ],
         { timeout: 180_000 }
       );
     }
@@ -273,8 +330,9 @@ export async function deployChatCompletionsBackend({
   steps.start(6);
   let principalId;
   try {
-    const identityRaw = await exec(
-      `az functionapp identity assign --name ${functionAppName} --resource-group ${resourceGroup} --output json`,
+    const identityRaw = await run(
+      "az",
+      ["functionapp", "identity", "assign", "--name", functionAppName, "--resource-group", resourceGroup, "--output", "json"],
       { silent: true }
     );
     const identity = JSON.parse(identityRaw);
@@ -298,12 +356,9 @@ export async function deployChatCompletionsBackend({
         await new Promise((r) => setTimeout(r, delaySeconds[attempt] * 1000));
       }
       try {
-        await exec(
-          `az role assignment create ` +
-            `--assignee ${principalId} ` +
-            `--role "Cognitive Services OpenAI User" ` +
-            `--scope ${aiResourceId} ` +
-            `--output none`,
+        await run(
+          "az",
+          ["role", "assignment", "create", "--assignee", principalId, "--role", "Cognitive Services OpenAI User", "--scope", aiResourceId, "--output", "none"],
           { silent: true }
         );
         steps.done(7, "Cognitive Services OpenAI User");
@@ -333,15 +388,15 @@ export async function deployChatCompletionsBackend({
   }
 
   // ── 8: Code deploy (func publish needs the terminal) ────────
-  // execLive prints arbitrary output that fights with the step list's
-  // in-place redraw. We pause the list, let func publish own the terminal,
-  // then reset() so the next render starts fresh below the publish output.
+  // runLive streams func's own build output. We pause the step list, let
+  // func publish own the terminal, then resume() so the next render starts
+  // fresh below the publish output.
   steps.update(8, "publishing proxy code (remote build, ~2 min)…");
   steps.suspend();
   log("");
   process.chdir(backendDir);
   try {
-    execLive(`func azure functionapp publish ${functionAppName} --javascript --build remote`);
+    runLive("func", ["azure", "functionapp", "publish", functionAppName, "--javascript", "--build", "remote"]);
   } catch (e) {
     log("");
     log(`  ${colors.red}Code publish failed.${colors.reset}`);
@@ -368,12 +423,9 @@ export async function deployChatCompletionsBackend({
       // Sec-2: backend rejects callers without this app role assignment.
       `REQUIRED_APP_ROLE=${backendApiConfig.roleValue}`,
     ];
-    await exec(
-      `az functionapp config appsettings set ` +
-        `--name ${functionAppName} ` +
-        `--resource-group ${resourceGroup} ` +
-        `--settings ${settings.map((s) => `"${s}"`).join(" ")} ` +
-        `--output none`,
+    await run(
+      "az",
+      ["functionapp", "config", "appsettings", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--settings", ...settings, "--output", "none"],
       { silent: true }
     );
     steps.done(9, `${settings.length} env vars`);
@@ -390,9 +442,9 @@ export async function deployChatCompletionsBackend({
   // headers, even on protected endpoints.
   steps.start(10);
   try {
-    await exec(
-      `az functionapp cors add --name ${functionAppName} --resource-group ${resourceGroup} ` +
-        `--allowed-origins "${sharepointOrigin}" --output none`,
+    await run(
+      "az",
+      ["functionapp", "cors", "add", "--name", functionAppName, "--resource-group", resourceGroup, "--allowed-origins", sharepointOrigin, "--output", "none"],
       { silent: true, ignoreError: true }
     );
     await configureFunctionAppEasyAuth({
@@ -411,12 +463,14 @@ export async function deployChatCompletionsBackend({
   // ── 11: Platform hardening (Sec-7) ──────────────────────────
   steps.start(11, "HTTPS-only · TLS 1.2 · FTP off…");
   try {
-    await exec(
-      `az functionapp update --name ${functionAppName} --resource-group ${resourceGroup} --set httpsOnly=true --output none`,
+    await run(
+      "az",
+      ["functionapp", "update", "--name", functionAppName, "--resource-group", resourceGroup, "--set", "httpsOnly=true", "--output", "none"],
       { silent: true }
     );
-    await exec(
-      `az functionapp config set --name ${functionAppName} --resource-group ${resourceGroup} --min-tls-version 1.2 --ftps-state Disabled --output none`,
+    await run(
+      "az",
+      ["functionapp", "config", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--min-tls-version", "1.2", "--ftps-state", "Disabled", "--output", "none"],
       { silent: true }
     );
     steps.done(11, "HTTPS-only · TLS 1.2 · FTP disabled");
@@ -424,32 +478,50 @@ export async function deployChatCompletionsBackend({
     bail(steps, 11, e);
   }
 
-  // ── 12: Application Insights (Sec-7) ────────────────────────
-  steps.start(12, `provisioning ${aiServicesName}-ai…`);
+  // ── 12: Telemetry & diagnostics (Sec-7) ─────────────────────
+  // Workspace-based App Insights (classic key-only mode is deprecated) plus
+  // diagnostic settings routing each resource's logs + metrics to a per-RG
+  // Log Analytics workspace. Best-effort: the deploy still works without
+  // telemetry, but a skip is surfaced rather than silent.
+  steps.start(12, "Log Analytics + App Insights…");
   try {
     const aiInsightsName = `${functionAppName}-ai`.slice(0, 60);
-    // Idempotent: create if missing, then read connection string.
-    await exec(
-      `az monitor app-insights component create --app ${aiInsightsName} --location ${location} --resource-group ${resourceGroup} --kind web --output none`,
-      { silent: true, ignoreError: true }
-    );
-    const connStringRaw = await exec(
-      `az monitor app-insights component show --app ${aiInsightsName} --resource-group ${resourceGroup} --query connectionString --output tsv`,
-      { silent: true }
-    );
-    const connString = connStringRaw.trim();
+    const workspaceId = await ensureLogAnalyticsWorkspace(resourceGroup, location, namePrefix);
+
+    const createArgs = ["monitor", "app-insights", "component", "create", "--app", aiInsightsName, "--location", location, "--resource-group", resourceGroup, "--kind", "web", "--output", "none"];
+    if (workspaceId) createArgs.push("--workspace", workspaceId);
+    await run("az", createArgs, { silent: true, ignoreError: true });
+
+    const connString = (
+      await run(
+        "az",
+        ["monitor", "app-insights", "component", "show", "--app", aiInsightsName, "--resource-group", resourceGroup, "--query", "connectionString", "--output", "tsv"],
+        { silent: true, ignoreError: true }
+      )
+    ).trim();
     if (connString) {
-      await exec(
-        `az functionapp config appsettings set --name ${functionAppName} --resource-group ${resourceGroup} --settings "APPLICATIONINSIGHTS_CONNECTION_STRING=${connString}" --output none`,
+      await run(
+        "az",
+        ["functionapp", "config", "appsettings", "set", "--name", functionAppName, "--resource-group", resourceGroup, "--settings", `APPLICATIONINSIGHTS_CONNECTION_STRING=${connString}`, "--output", "none"],
         { silent: true }
       );
-      steps.done(12, aiInsightsName);
-    } else {
-      steps.done(12, "skipped (could not read connection string)");
     }
+
+    let diagCount = 0;
+    if (workspaceId) {
+      const funcId = await resourceId("functionapp", functionAppName, resourceGroup);
+      const storeId = await resourceId("storage", storageName, resourceGroup);
+      if (funcId && (await ensureDiagnosticSetting(funcId, workspaceId, { logs: true, metrics: true }))) diagCount++;
+      if (aiResourceId && (await ensureDiagnosticSetting(aiResourceId, workspaceId, { logs: true, metrics: true }))) diagCount++;
+      if (storeId && (await ensureDiagnosticSetting(storeId, workspaceId, { logs: false, metrics: true }))) diagCount++;
+    }
+    const note = workspaceId
+      ? `${aiInsightsName} → Log Analytics  (${diagCount} diag settings)`
+      : `${aiInsightsName}  (no workspace — App Insights only)`;
+    steps.done(12, note);
   } catch (e) {
-    // Non-fatal: deploy still works without App Insights, just no telemetry.
-    steps.done(12, `skipped (${(e.message || String(e)).split("\n").pop()})`);
+    // Non-fatal: deploy still works without telemetry.
+    steps.done(12, `partial (${(e.message || String(e)).split("\n").pop()})`);
   }
 
   // ── 13: Health check ────────────────────────────────────────
@@ -492,6 +564,14 @@ export async function deployChatCompletionsBackend({
     log(`  ${colors.yellow}Required next step — assign users to the '${backendApiConfig.roleValue}' role:${colors.reset}`);
     logInfo(portalUrl);
     logInfo("Without an assignment, calls to the proxy return 403. This is the deliberate default-deny posture.");
+  }
+
+  if (localAuthWarnTarget) {
+    log("");
+    log(`  ${colors.yellow}⚠ Could not disable key (local) auth on the Foundry account — API keys are STILL ENABLED.${colors.reset}`);
+    logInfo("The proxy uses managed identity regardless, but a leaked/listed key would bypass the auth gate.");
+    logInfo("Fix it manually, then re-check:");
+    logInfo(disableLocalAuthHint(localAuthWarnTarget));
   }
 
   return {

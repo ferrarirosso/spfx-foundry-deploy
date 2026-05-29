@@ -1,4 +1,4 @@
-import { exec, parseJsonOutput } from "../lib/exec.mjs";
+import { run, parseJsonOutput } from "../lib/exec.mjs";
 import { ask } from "../lib/ask.mjs";
 
 export async function suggestSharePointOrigin() {
@@ -7,7 +7,7 @@ export async function suggestSharePointOrigin() {
 
 async function suggestFromAccount() {
   const account = parseJsonOutput(
-    await exec(`az account show --output json`, { silent: true, ignoreError: true })
+    await run("az", ["account", "show", "--output", "json"], { silent: true, ignoreError: true })
   );
   const userName = account?.user?.name || "";
   const at = userName.indexOf("@");

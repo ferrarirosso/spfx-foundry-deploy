@@ -1,11 +1,12 @@
-import { exec, parseJsonOutput } from "../lib/exec.mjs";
+import { run, parseJsonOutput } from "../lib/exec.mjs";
 import { logInfo } from "../lib/log.mjs";
 import { pickFromList } from "./menu.mjs";
 
 export async function pickSubscription() {
   const subs = parseJsonOutput(
-    await exec(
-      `az account list --query "[].{name:name,id:id,tenantId:tenantId,isDefault:isDefault}" --output json`,
+    await run(
+      "az",
+      ["account", "list", "--query", "[].{name:name,id:id,tenantId:tenantId,isDefault:isDefault}", "--output", "json"],
       { silent: true }
     ),
     []
@@ -22,7 +23,7 @@ export async function pickSubscription() {
   });
   if (!chosen.isDefault) {
     logInfo(`Switching active subscription to ${chosen.id}`);
-    await exec(`az account set --subscription ${chosen.id}`, { silent: true });
+    await run("az", ["account", "set", "--subscription", chosen.id], { silent: true });
   }
   return { subscriptionId: chosen.id, tenantId: chosen.tenantId, name: chosen.name };
 }

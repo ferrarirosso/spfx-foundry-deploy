@@ -55,6 +55,16 @@ async function main() {
   }
 
   log("\n  Configure your local proxy settings:\n", colors.dim);
+  logInfo(
+    "Foundry accounts provisioned by `deploy` have key auth disabled — leave the"
+  );
+  logInfo(
+    "API key empty and authenticate locally with managed identity (`az login`)."
+  );
+  logInfo(
+    "A key only works against an account that still allows local/key auth."
+  );
+  log("");
   const endpoint = await ask(
     "Azure OpenAI / Foundry endpoint (e.g. https://<name>.openai.azure.com)",
     ""
@@ -63,7 +73,9 @@ async function main() {
     "Deployment name",
     `${config.slug.replace(/[^a-z0-9-]/g, "")}-gpt5mini`
   );
-  const apiKey = await askSecret("API key (leave empty for managed identity)");
+  const apiKey = await askSecret(
+    "API key (leave empty for managed identity — recommended)"
+  );
   const allowedOriginRaw = await ask("Allowed local origin", "https://localhost:4322");
   const allowedOrigin = allowedOriginRaw.replace(/\/+$/, "");
 
@@ -95,7 +107,7 @@ async function main() {
   logInfo("cd backend && npm start");
   logInfo("Then test: curl http://localhost:7071/api/health");
   if (apiKey) {
-    logInfo("Auth: using API key");
+    logInfo("Auth: using API key (only works if the Foundry account allows local/key auth)");
   } else {
     logInfo("Auth: using managed identity (run 'az login' first)");
   }
